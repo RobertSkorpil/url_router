@@ -137,9 +137,11 @@ struct arg_finder<argument_pattern<L>, void>
 };
 
 template<literal L, literal L2, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<arg<L2, T>, Args...>, std::enable_if_t<L != L2>>
+struct arg_finder<argument_pattern<L>, std::tuple<arg<L2, T>, Args...>, void>
 {
 	using next_arg_finder = arg_finder<argument_pattern<L>, std::tuple<Args...>>;
+	using type = next_arg_finder::type;
+	using arg = next_arg_finder::arg;
 };
 
 template<typename T>
@@ -284,8 +286,8 @@ struct router_t
 };
 
 
-endpoint<"/product/<id>/xxx">
-product(arg<"id", uint32_t> id)
+endpoint<"/product/<category>/<id>">
+product(arg<"id", uint32_t> id, arg<"cateory", uint32_t> cat)
 {
     return 1;
 }
@@ -294,6 +296,6 @@ router_t<product> router{};
 
 int main()
 {
-	router.route("/product/1/xxx");
+	router.route("/product/1/23");
 	return 0;
 }
