@@ -12,7 +12,7 @@
 template<std::size_t N>
 struct literal
 {
-    std::array<char, N - 1> str;
+	std::array<char, N - 1> str;
 
 	static constexpr size_t size{ N - 1 };
 
@@ -59,7 +59,7 @@ template<typename pattern, typename next>
 struct pattern_chain {};
 
 template<literal l, size_t from>
-consteval auto find_parms()
+consteval auto find_patterns()
 {
 	if constexpr (constexpr auto b{ find_brackets(l, from) }; std::get<1>(b))
 		return
@@ -67,7 +67,7 @@ consteval auto find_parms()
 		fixed_pattern<l.substr<from, std::get<0>(b) - from>()>,
 		pattern_chain<
 		argument_pattern<l.substr<std::get<0>(b) + 1, std::get<1>(b) - 1>()>,
-		decltype(find_parms<l, std::get<0>(b) + std::get<1>(b) + 1>())>>{};
+		decltype(find_patterns<l, std::get<0>(b) + std::get<1>(b) + 1>())>>{};
 	else if constexpr (from == l.str.size())
 		return last{};
 	else
@@ -79,13 +79,7 @@ consteval auto find_parms()
 template<literal l>
 consteval auto parse_route_string()
 {
-	return find_parms<l, 0>();
-}
-
-template<literal L>
-consteval auto operator ""_route()
-{
-	return parse_route_string<L>();
+	return find_patterns<l, 0>();
 }
 
 template<literal l, typename T>
@@ -220,8 +214,8 @@ struct router_t
 					auto result{ std::from_chars(str.data(), str.data() + str.size(), std::get<arg>(values).value) };
 					return result.ec == std::errc{};
 				}
-                else
-                    return false;
+				else
+					return false;
 			}
 			else if constexpr (std::is_same_v<type, std::string_view>)
 			{
@@ -260,7 +254,7 @@ struct router_t
 	{
 		using pattern_tuple = dechain<typename route::route>::tuple;
 		using matcher = pattern_matcher<tuple, typename route::args, pattern_tuple>;
-        std::println("{}", typeid(matcher).name());
+		std::println("{}", typeid(matcher).name());
 		if (matcher{}(values, url))
 			return true;
 		else
@@ -272,7 +266,7 @@ struct router_t
 	{
 		using re = route_extractor<decltype(route)>;
 		using tuple = re::args;
-        tuple values{};
+		tuple values{};
 		if (matches<re>(url, values))
 			return std::apply(route, values).value;
 		else
@@ -289,7 +283,7 @@ struct router_t
 endpoint<"/product/<category>/<id>">
 product(arg<"id", uint32_t> id, arg<"category", uint32_t> cat)
 {
-    return 1;
+	return 1;
 }
 
 router_t<product> router{};
