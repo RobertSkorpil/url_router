@@ -160,7 +160,7 @@ struct endpoint
 	using return_type_t = int;
 
 	return_type_t value;
-	endpoint(return_type_t&&) {};
+	endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
 };
 
 template<typename T>
@@ -287,7 +287,7 @@ struct router_t
 
 
 endpoint<"/product/<category>/<id>">
-product(arg<"id", uint32_t> id, arg<"cateory", uint32_t> cat)
+product(arg<"id", uint32_t> id, arg<"category", uint32_t> cat)
 {
     return 1;
 }
