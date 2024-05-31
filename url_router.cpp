@@ -56,22 +56,22 @@ template<literal l>
 struct fixed_pattern {};
 
 template<typename pattern, typename next>
-struct literal_chain {};
+struct pattern_chain {};
 
 template<literal l, size_t from>
 consteval auto find_parms()
 {
 	if constexpr (constexpr auto b{ find_brackets(l, from) }; std::get<1>(b))
 		return
-		literal_chain<
+		pattern_chain<
 		fixed_pattern<l.substr<from, std::get<0>(b) - from>()>,
-		literal_chain<
+		pattern_chain<
 		argument_pattern<l.substr<std::get<0>(b) + 1, std::get<1>(b) - 1>()>,
 		decltype(find_parms<l, std::get<0>(b) + std::get<1>(b) + 1>())>>{};
 	else if constexpr (from == l.str.size())
 		return last{};
 	else
-		return literal_chain<
+		return pattern_chain<
 		fixed_pattern<l.substr<from, l.str.size() - from>()>,
 		last>{};
 }
@@ -96,50 +96,50 @@ struct arg
 };
 
 template<typename chain>
-struct dechain_t {};
+struct dechain {};
 
 template<>
-struct dechain_t<last>
+struct dechain<last>
 {
 	using tuple = std::tuple<>;
 };
 
 template<typename pattern>
-struct dechain_t<literal_chain<pattern, last>>
+struct dechain<pattern_chain<pattern, last>>
 {
 	using tuple = std::tuple<pattern>;
 };
 
 template<typename pattern, typename next>
-struct dechain_t<literal_chain<pattern, next>>
+struct dechain<pattern_chain<pattern, next>>
 {
 	using tuple = decltype(
 		std::tuple_cat(
 			std::declval<typename std::tuple<pattern>>(),
-			std::declval<typename dechain_t<next>::tuple>()
+			std::declval<typename dechain<next>::tuple>()
 		));
 };
 
-template<typename pattern, typename call_operator, typename = void>
+template<typename pattern, typename argument_tuple, typename = void>
 struct arg_finder {};
 
-template<literal L, typename T, typename endpoint, typename Ret, typename...Args>
-struct arg_finder<argument_pattern<L>, Ret(endpoint::*)(arg<L, T>, Args...)>
+template<literal L, typename T, typename...Args>
+struct arg_finder<argument_pattern<L>, std::tuple<arg<L, T>, Args...>>
 {
 	using type = T;
 	using arg = arg<L, T>;
 };
 
-template<literal L, typename endpoint, typename Ret>
-struct arg_finder<argument_pattern<L>, Ret(endpoint::*)()>
+template<literal L>
+struct arg_finder<argument_pattern<L>, void>
 {
 	using type = std::false_type;
 };
 
-template<literal L, literal L2, typename T, typename endpoint, typename Ret, typename...Args>
-struct arg_finder<argument_pattern<L>, Ret(endpoint::*)(arg<L2, T>, Args...), std::enable_if_t<L != L2>>
+template<literal L, literal L2, typename T, typename...Args>
+struct arg_finder<argument_pattern<L>, std::tuple<arg<L2, T>, Args...>, std::enable_if_t<L != L2>>
 {
-	using next_arg_finder = arg_finder<argument_pattern<L>, Ret(endpoint::*)(Args...)>;
+	using next_arg_finder = arg_finder<argument_pattern<L>, std::tuple<Args...>>;
 };
 
 template<typename T>
@@ -151,10 +151,27 @@ struct parms_to_tupler<Ret(endpoint::*)(Args...)>
 	using type = std::tuple<Args...>;
 };
 
-template<typename T>
-concept route_like = requires { T::route; };
+template<literal route_string>
+struct endpoint
+{
+	using route = decltype(parse_route_string<route_string>());
+	using return_type_t = int;
 
-template<route_like...routes>
+	return_type_t value;
+	endpoint(return_type_t&&) {};
+};
+
+template<typename T>
+struct route_extractor {};
+
+template<typename endpoint, typename...args_>
+struct route_extractor<endpoint(*)(args_...)>
+{
+	using route = endpoint::route;
+	using args = std::tuple<args_...>;
+};
+
+template<auto...routes>
 struct router_t
 {
 	template<int = 0>
@@ -164,11 +181,11 @@ struct router_t
 		throw std::runtime_error{ "no route" };
 	}
 
-	template<typename call_operator, typename T, typename tuple>
+	template<typename argument_tuple, typename T, typename tuple>
 	struct single_pattern_matcher {};
 
-	template<typename call_operator, literal L, typename tuple>
-	struct single_pattern_matcher<call_operator, fixed_pattern<L>, tuple>
+	template<typename argument_tuple, literal L, typename tuple>
+	struct single_pattern_matcher<argument_tuple, fixed_pattern<L>, tuple>
 	{
 		bool operator()(tuple &values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
@@ -184,12 +201,12 @@ struct router_t
 		}
 	};
 
-	template<typename call_operator, literal L, typename tuple>
-	struct single_pattern_matcher<call_operator, argument_pattern<L>, tuple>
+	template<typename argument_tuple, literal L, typename tuple>
+	struct single_pattern_matcher<argument_tuple, argument_pattern<L>, tuple>
 	{
 		bool operator()(tuple &values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
-			using argument_finder = arg_finder<argument_pattern<L>, call_operator>;
+			using argument_finder = arg_finder<argument_pattern<L>, argument_tuple>;
 			using type = argument_finder::type;
 			using arg = argument_finder::arg;
 
@@ -218,16 +235,16 @@ struct router_t
 		}
 	};
 
-	template<typename tuple, typename call_operator, typename T>
+	template<typename tuple, typename argument_tuple, typename T>
 	struct pattern_matcher {};
 
-	template<typename tuple, typename call_operator, typename...patterns>
-	struct pattern_matcher<tuple, call_operator, std::tuple<patterns...>>
+	template<typename tuple, typename argument_tuple, typename...patterns>
+	struct pattern_matcher<tuple, argument_tuple, std::tuple<patterns...>>
 	{
 		bool operator()(tuple &values, std::string_view url) const
 		{
 			auto i{ url.begin() };
-			return (single_pattern_matcher<call_operator, patterns, tuple>{}(values, i, url.end()) && ...);
+			return (single_pattern_matcher<argument_tuple, patterns, tuple>{}(values, i, url.end()) && ...);
 		}
 	};
 
@@ -236,10 +253,11 @@ struct router_t
 		return true;
 	}
 
-	template<route_like route, typename tuple>
+	template<typename route, typename tuple>
 	bool matches(std::string_view url, tuple &values)
 	{
-		using matcher = pattern_matcher<tuple, decltype(&route::operator ()), typename dechain_t<std::decay_t<decltype(route::route)>>::tuple>;
+		using pattern_tuple = dechain<typename route::route>::tuple;
+		using matcher = pattern_matcher<tuple, typename route::args, pattern_tuple>;
         std::println("{}", typeid(matcher).name());
 		if (matcher{}(values, url))
 			return true;
@@ -247,13 +265,14 @@ struct router_t
 			return false;
 	}
 
-	template<route_like route, route_like...other_routes>
+	template<auto route, auto...other_routes>
 	auto try_route(std::string_view url)
 	{
-        using tuple = parms_to_tupler<decltype(&route::operator ())>::type;
+		using re = route_extractor<decltype(route)>;
+		using tuple = re::args;
         tuple values{};
-		if (matches<route>(url, values))
-			return std::apply([](auto...args) { return route{}(args...); }, values);
+		if (matches<re>(url, values))
+			return std::apply(route, values).value;
 		else
 			return try_route<other_routes...>(url);
 	}
@@ -265,20 +284,16 @@ struct router_t
 };
 
 
-struct endpoint_1
+endpoint<"/product/<id>/xxx">
+product(arg<"id", uint32_t> id)
 {
-	static constexpr auto route = "/product/<id>/xxx"_route;
+    return 1;
+}
 
-	auto operator()(arg<"id", uint32_t> id)
-	{
-		return 1;
-	}
-};
-router_t<endpoint_1> router{};
+router_t<product> router{};
 
 int main()
 {
-	std::println("{}", typeid(router).name());
 	router.route("/product/1/xxx");
 	return 0;
 }
