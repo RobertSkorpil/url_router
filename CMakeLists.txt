@@ -11,10 +11,11 @@ endif()
 
 project ("url_router")
 find_package(ctre CONFIG REQUIRED)
+find_package(Boost REQUIRED COMPONENTS url)
 
 add_executable (url_router "url_router.cpp")
 
-target_link_libraries(url_router PRIVATE ctre::ctre)
+target_link_libraries(url_router PRIVATE ctre::ctre Boost::headers Boost::url)
 
 set_property(TARGET url_router PROPERTY CXX_STANDARD 23)
 

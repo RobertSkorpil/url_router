@@ -7,6 +7,7 @@
 #include <tuple>
 #include <charconv>
 #include <functional>
+#include <boost/url.hpp>
 #include <ctre.hpp>
 
 template<std::size_t N>
@@ -83,7 +84,14 @@ consteval auto parse_route_string()
 }
 
 template<literal l, typename T>
-struct arg
+struct path_arg
+{
+	static constexpr auto name{ l };
+	T value;
+};
+
+template<literal l, typename T>
+struct query_arg
 {
 	static constexpr auto name{ l };
 	T value;
@@ -118,10 +126,10 @@ template<typename pattern, typename argument_tuple, typename = void>
 struct arg_finder {};
 
 template<literal L, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<arg<L, T>, Args...>>
+struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
 {
 	using type = T;
-	using arg = arg<L, T>;
+	using arg = path_arg<L, T>;
 };
 
 template<literal L>
@@ -131,20 +139,11 @@ struct arg_finder<argument_pattern<L>, void>
 };
 
 template<literal L, literal L2, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<arg<L2, T>, Args...>, void>
+struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>, void>
 {
 	using next_arg_finder = arg_finder<argument_pattern<L>, std::tuple<Args...>>;
 	using type = next_arg_finder::type;
 	using arg = next_arg_finder::arg;
-};
-
-template<typename T>
-struct parms_to_tupler {};
-
-template<typename endpoint, typename Ret, typename...Args>
-struct parms_to_tupler<Ret(endpoint::*)(Args...)>
-{
-	using type = std::tuple<Args...>;
 };
 
 template<literal route_string>
@@ -170,8 +169,9 @@ struct route_extractor<endpoint(*)(args_...)>
 template<auto...routes>
 struct router_t
 {
+private:
 	template<int = 0>
-	auto try_route(std::string_view url)
+	auto try_route(boost::urls::url_view url)
 	{
 		return 1;
 		throw std::runtime_error{ "no route" };
@@ -261,35 +261,58 @@ struct router_t
 			return false;
 	}
 
+	template<typename arg, typename tuple>
+	void fill_non_path_arg(tuple& values, boost::urls::url_view url)
+	{
+		
+	}
+
+	template<typename... args>
+	void fill_non_path_args(std::tuple<args...>& values, boost::urls::url_view url)
+	{
+		((fill_non_path_arg<args>(values, url)), ...);
+	}
+
 	template<auto route, auto...other_routes>
-	auto try_route(std::string_view url)
+	auto try_route(boost::urls::url_view url)
 	{
 		using re = route_extractor<decltype(route)>;
 		using tuple = re::args;
 		tuple values{};
-		if (matches<re>(url, values))
+		if (matches<re>(url.path(), values))
+		{
+			fill_non_path_args(values, url);
 			return std::apply(route, values).value;
+		}
 		else
 			return try_route<other_routes...>(url);
 	}
-
+public:
 	auto route(std::string_view url)
 	{
-		return try_route<routes...>(url);
+		auto parsed_url{ boost::urls::parse_origin_form(url) };
+		return try_route<routes...>(parsed_url->path());
 	}
 };
 
 
 endpoint<"/product/<category>/<id>">
-product(arg<"id", uint32_t> id, arg<"category", uint32_t> cat)
+product(path_arg<"id", uint32_t> id, path_arg<"category", uint32_t> cat)
 {
 	return 1;
 }
 
-router_t<product> router{};
+endpoint<"/category/<category>">
+category(path_arg<"category", uint32_t> cat, query_arg<"count", uint32_t> count)
+{
+	return 1;
+}
+
+router_t<product, category> router{};
 
 int main()
 {
 	router.route("/product/1/23");
+	router.route("/category/234");
 	return 0;
 }
