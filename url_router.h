@@ -1,4 +1,4 @@
-﻿#include <array>
+#include <array>
 #include <cstddef>
 #include <algorithm>
 #include <vector>
@@ -8,6 +8,7 @@
 #include <charconv>
 #include <functional>
 #include <boost/url.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <ctre.hpp>
 
 template<std::size_t N>
@@ -99,6 +100,21 @@ struct path_arg
 {
 	static constexpr auto name{ l };
 	T value;
+
+	operator T& ()
+	{
+		return value;
+	}
+
+	T* operator ->()
+	{
+		return &value;
+	}
+
+	T& operator *()
+	{
+		return value;
+	}
 };
 
 template<literal l, typename T>
@@ -106,6 +122,41 @@ struct query_arg
 {
 	static constexpr auto name{ l };
 	T value;
+
+	operator T& ()
+	{
+		return value;
+	}
+
+	T* operator ->()
+	{
+		return &value;
+	}
+
+	T& operator *()
+	{
+		return value;
+	}
+};
+
+struct url_arg
+{
+	boost::urls::url_view url;
+
+	operator boost::urls::url_view()
+	{
+		return url;
+	}
+
+	boost::urls::url_view *operator ->()
+	{
+		return &url;
+	}
+
+	boost::urls::url_view& operator *()
+	{
+		return url;
+	}
 };
 
 template<typename chain>
@@ -157,13 +208,13 @@ struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>, voi
 	using arg = next_arg_finder::arg;
 };
 
-template<literal route_string>
+template<literal route_string, typename result_t>
 struct endpoint
 {
 	using route = decltype(parse_route_string<route_string>());
-	using return_type_t = int;
+	using return_type_t = result_t;
 
-	return_type_t value;
+	result_t value;
 	endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
 };
 
@@ -173,9 +224,30 @@ struct route_extractor {};
 template<typename endpoint, typename...args_>
 struct route_extractor<endpoint(*)(args_...)>
 {
+	static constexpr bool is_awaitable{ false };
 	using route = endpoint::route;
 	using args = std::tuple<args_...>;
+	using return_type = endpoint::return_type_t;
 };
+
+template<typename klass, typename endpoint, typename...args_>
+struct route_extractor<endpoint(klass::*)(args_...)>
+{
+	static constexpr bool is_awaitable{ false };
+	using route = endpoint::route;
+	using args = std::tuple<klass *, args_...>;
+	using return_type = endpoint::return_type_t;
+};
+
+/*
+template<typename klass, typename endpoint, typename...args_>
+struct route_extractor<boost::asio::awaitable<endpoint>(klass::*)(args_...)>
+{
+	static constexpr bool is_awaitable{ true };
+	using route = endpoint::route;
+	using args = std::tuple<klass *, args_...>;
+	using return_type = boost::asio::awaitable<endpoint>;
+};	*/
 
 template<auto...routes>
 struct router_t
@@ -187,7 +259,7 @@ private:
 	template<typename argument_tuple, literal L, typename tuple>
 	struct single_pattern_matcher<argument_tuple, fixed_pattern<L>, tuple>
 	{
-		bool operator()(tuple &values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
+		bool operator()(tuple& values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
 			if (std::distance(begin, end) < L.size)
 				return false;
@@ -201,10 +273,20 @@ private:
 		}
 	};
 
+	template<typename argument_tuple, typename tuple>
+	struct single_pattern_matcher<argument_tuple, argument_pattern<"*">, tuple>
+	{
+		bool operator()(tuple& values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
+		{
+			begin = end;
+			return true;
+		}
+	};
+
 	template<typename argument_tuple, literal L, typename tuple>
 	struct single_pattern_matcher<argument_tuple, argument_pattern<L>, tuple>
 	{
-		bool operator()(tuple &values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
+		bool operator()(tuple& values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
 			using argument_finder = arg_finder<argument_pattern<L>, argument_tuple>;
 			using type = argument_finder::type;
@@ -241,7 +323,7 @@ private:
 	template<typename tuple, typename argument_tuple, typename...patterns>
 	struct pattern_matcher<tuple, argument_tuple, std::tuple<patterns...>>
 	{
-		bool operator()(tuple &values, std::string_view url) const
+		bool operator()(tuple& values, std::string_view url) const
 		{
 			auto i{ url.begin() };
 			return (single_pattern_matcher<argument_tuple, patterns, tuple>{}(values, i, url.end()) && ...);
@@ -254,7 +336,7 @@ private:
 	}
 
 	template<typename route, typename tuple>
-	bool matches(std::string_view url, tuple &values)
+	bool matches(std::string_view url, tuple& values)
 	{
 		using pattern_tuple = dechain<typename route::route>::tuple;
 		using matcher = pattern_matcher<tuple, typename route::args, pattern_tuple>;
@@ -272,10 +354,7 @@ private:
 	};
 
 	template<typename T>
-	struct non_path_arg_filler {};
-
-	template<literal L, typename T>
-	struct non_path_arg_filler<path_arg<L, T>>
+	struct non_path_arg_filler 
 	{
 		template<typename tuple>
 		static void fill(tuple& values, const route_context& ctx) {}
@@ -309,27 +388,44 @@ private:
 		}
 	};
 
+	template<>
+	struct non_path_arg_filler<url_arg>
+	{
+		template<typename tuple>
+		static void fill(tuple& values, const route_context& ctx)
+		{
+			std::get<url_arg>(values).url = boost::urls::url_view{ ctx.url };
+		}
+	};
+
 	template<typename arg, typename tuple>
-	void fill_non_path_arg(tuple &values, const route_context &ctx)
+	void fill_non_path_arg(tuple& values, const route_context& ctx)
 	{
 		non_path_arg_filler<arg>::fill(values, ctx);
 	}
 
 	template<typename... args>
-	void fill_non_path_args(std::tuple<args...>& values, const route_context &ctx)
+	void fill_non_path_args(std::tuple<args...>& values, const route_context& ctx)
 	{
 		((fill_non_path_arg<args>(values, ctx)), ...);
 	}
 
-	template<int = 0>
-	auto try_route(const route_context &ctx)
+	template<typename first, typename... rest>
+	struct first_type_getter
 	{
-		return 1;
+		using type = first;
+	};
+
+	using return_type = typename route_extractor<typename first_type_getter<decltype(routes)...>::type>::return_type;
+
+	template<typename explicit_args_tuple>
+	return_type try_route(explicit_args_tuple expl_args, const route_context& ctx)
+	{
 		throw std::runtime_error{ "no route" };
 	}
 
-	template<auto route, auto...other_routes>
-	auto try_route(const route_context &ctx)
+	template<typename explicit_args_tuple, auto route, auto...other_routes>
+	return_type try_route(explicit_args_tuple expl_args, const route_context& ctx)
 	{
 		using re = route_extractor<decltype(route)>;
 		using tuple = re::args;
@@ -337,38 +433,20 @@ private:
 		if (matches<re>(ctx.url.path(), values))
 		{
 			fill_non_path_args(values, ctx);
-			return std::apply(route, values).value;
+			if constexpr (re::is_awaitable)
+				co_return std::apply(route, values);
+			else
+				return std::apply(route, values).value;
 		}
 		else
-			return try_route<other_routes...>(ctx);
+			return try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
 	}
 public:
-	auto route(std::string_view url)
+	template<typename...explicit_args>
+	return_type route(std::string_view url, explicit_args...expl_args)
 	{
 		auto parsed_url{ boost::urls::parse_origin_form(url) };
 		route_context ctx{ *parsed_url };
-		return try_route<routes...>(ctx);
+		return try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
 	}
 };
-
-
-endpoint<"/product/<category>/<id>">
-product(path_arg<"id", uint32_t> id, path_arg<"category", uint32_t> cat)
-{
-	return 1;
-}
-
-endpoint<"/category/<category>">
-category(path_arg<"category", uint32_t> cat, query_arg<"count", uint32_t> count)
-{
-	return 1;
-}
-
-router_t<product, category> router{};
-
-int main()
-{
-	router.route("/product/1/23");
-	router.route("/category/234?count=123");
-	return 0;
-}
