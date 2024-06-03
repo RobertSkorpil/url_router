@@ -2,13 +2,14 @@
 #include <cstddef>
 #include <algorithm>
 #include <vector>
-#include <print>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <charconv>
 #include <functional>
 #include <boost/url.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/beast.hpp>
 #include <ctre.hpp>
 
 template<std::size_t N>
@@ -184,8 +185,14 @@ struct dechain<pattern_chain<pattern, next>>
 		));
 };
 
-template<typename pattern, typename argument_tuple, typename = void>
-struct arg_finder {};
+struct ignore_t {};
+
+template<typename pattern, typename argument_tuple>
+struct arg_finder 
+{
+	using type = ignore_t;
+	using arg = void;
+};
 
 template<literal L, typename T, typename...Args>
 struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
@@ -198,10 +205,11 @@ template<literal L>
 struct arg_finder<argument_pattern<L>, void>
 {
 	using type = std::false_type;
+	using arg = void;
 };
 
 template<literal L, literal L2, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>, void>
+struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
 {
 	using next_arg_finder = arg_finder<argument_pattern<L>, std::tuple<Args...>>;
 	using type = next_arg_finder::type;
@@ -209,27 +217,41 @@ struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>, voi
 };
 
 template<literal route_string, typename result_t>
-struct endpoint
+struct basic_endpoint
 {
 	using route = decltype(parse_route_string<route_string>());
 	using return_type_t = result_t;
 
 	result_t value;
-	endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
+	basic_endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
 };
+
+template<literal route_string>
+using endpoint = boost::asio::awaitable<basic_endpoint<route_string, boost::beast::http::response<boost::beast::http::string_body>>>;
 
 template<typename T>
 struct route_extractor {};
 
+/*
 template<typename endpoint, typename...args_>
 struct route_extractor<endpoint(*)(args_...)>
 {
-	static constexpr bool is_awaitable{ false };
 	using route = endpoint::route;
 	using args = std::tuple<args_...>;
 	using return_type = endpoint::return_type_t;
 };
+*/
 
+template<typename endpoint, typename...args_>
+struct route_extractor<boost::asio::awaitable<endpoint>(*)(args_...)>
+{
+	static constexpr bool is_awaitable{ true };
+	using route = endpoint::route;
+	using args = std::tuple<args_...>;
+	using return_type = boost::asio::awaitable<typename endpoint::return_type_t>;
+};
+
+/*
 template<typename klass, typename endpoint, typename...args_>
 struct route_extractor<endpoint(klass::*)(args_...)>
 {
@@ -238,8 +260,8 @@ struct route_extractor<endpoint(klass::*)(args_...)>
 	using args = std::tuple<klass *, args_...>;
 	using return_type = endpoint::return_type_t;
 };
+*/
 
-/*
 template<typename klass, typename endpoint, typename...args_>
 struct route_extractor<boost::asio::awaitable<endpoint>(klass::*)(args_...)>
 {
@@ -247,7 +269,7 @@ struct route_extractor<boost::asio::awaitable<endpoint>(klass::*)(args_...)>
 	using route = endpoint::route;
 	using args = std::tuple<klass *, args_...>;
 	using return_type = boost::asio::awaitable<endpoint>;
-};	*/
+};	
 
 template<auto...routes>
 struct router_t
@@ -292,7 +314,11 @@ private:
 			using type = argument_finder::type;
 			using arg = argument_finder::arg;
 
-			if constexpr (std::is_integral_v<type>)
+			if constexpr (std::is_same_v<type, ignore_t>)
+			{
+				return true;
+			}
+			else if constexpr (std::is_integral_v<type>)
 			{
 				if (auto [match, str] { ctre::match<R"(^(\d+).*)">(begin, end) }; match)
 				{
@@ -340,7 +366,6 @@ private:
 	{
 		using pattern_tuple = dechain<typename route::route>::tuple;
 		using matcher = pattern_matcher<tuple, typename route::args, pattern_tuple>;
-		std::println("{}", typeid(matcher).name());
 		if (matcher{}(values, url))
 			return true;
 		else
@@ -417,6 +442,13 @@ private:
 	};
 
 	using return_type = typename route_extractor<typename first_type_getter<decltype(routes)...>::type>::return_type;
+	static constexpr bool is_async{ route_extractor<typename first_type_getter<decltype(routes)...>::type>::is_awaitable };
+
+	template <typename T, typename Tuple>
+	struct has_type;
+
+	template <typename T, typename... Us>
+	struct has_type<T, std::tuple<Us...>> : std::disjunction<std::is_same<T, Us>...> {};
 
 	template<typename explicit_args_tuple>
 	return_type try_route(explicit_args_tuple expl_args, const route_context& ctx)
@@ -424,29 +456,53 @@ private:
 		throw std::runtime_error{ "no route" };
 	}
 
+	template<typename value_tuple, typename tuple>
+	struct explicit_args_filler {};
+
+	template<typename value_tuple, typename...explicit_args>
+	struct explicit_args_filler<value_tuple, std::tuple<explicit_args...>>
+	{
+		static void fill(value_tuple& tuple, const std::tuple<explicit_args...>& expl_args)
+		{
+			(([&] { if constexpr (has_type<explicit_args, value_tuple>::value) std::get<explicit_args>(tuple) = std::get<explicit_args>(expl_args); }()), ...);
+		}
+	};
+
 	template<typename explicit_args_tuple, auto route, auto...other_routes>
 	return_type try_route(explicit_args_tuple expl_args, const route_context& ctx)
 	{
 		using re = route_extractor<decltype(route)>;
 		using tuple = re::args;
 		tuple values{};
+		explicit_args_filler<tuple, explicit_args_tuple>::fill(values, expl_args);
+		ctx.url.path();
 		if (matches<re>(ctx.url.path(), values))
 		{
 			fill_non_path_args(values, ctx);
 			if constexpr (re::is_awaitable)
-				co_return std::apply(route, values);
+				co_return (co_await std::apply(route, values)).value;
 			else
 				return std::apply(route, values).value;
 		}
 		else
-			return try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
+		{
+			if constexpr (re::is_awaitable)
+				co_return co_await try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
+			else
+				return try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
+		}
 	}
 public:
 	template<typename...explicit_args>
-	return_type route(std::string_view url, explicit_args...expl_args)
+	return_type route(std::string url, explicit_args...expl_args)
 	{
 		auto parsed_url{ boost::urls::parse_origin_form(url) };
+		if (parsed_url.has_error())
+			throw std::runtime_error{ "url parse error" };
 		route_context ctx{ *parsed_url };
-		return try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
+		if constexpr (is_async)
+			co_return co_await try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
+		else
+			return try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
 	}
 };
