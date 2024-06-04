@@ -29,7 +29,6 @@ int main()
 {
 	boost::asio::io_context ctx;
 	simple_http_server<&hello, &divide, &not_found> srvr{ ctx, 3454 };
-	boost::asio::co_spawn(ctx, srvr.run_server_async(), detached);
 
 	std::jthread t{ [&] {ctx.run(); } };
 	getchar();

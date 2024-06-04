@@ -68,4 +68,12 @@ struct http_server
 };
 
 template<auto... routes>
-using simple_http_server = http_server<router_t<routes...>>;
+struct simple_http_server : http_server<router_t<routes...>>
+{
+	using base = http_server<router_t<routes...>>;
+	simple_http_server(asio::io_context& ctx, uint16_t port, asio::ip::address address = {})
+		: base{ ctx, port, address }
+	{
+		co_spawn(ctx, base::run_server_async(), detached);
+	}
+};
