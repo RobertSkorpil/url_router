@@ -1,16 +1,37 @@
-#include <array>
-#include <cstddef>
-#include <algorithm>
-#include <vector>
-#include <string>
-#include <string_view>
-#include <tuple>
-#include <charconv>
-#include <functional>
-#include <boost/url.hpp>
-#include <boost/asio/use_awaitable.hpp>
-#include <boost/beast.hpp>
-#include <ctre.hpp>
+#pragma once
+
+struct verb_mask
+{
+	uint64_t value{};
+
+	constexpr verb_mask() {}
+
+	constexpr verb_mask(uint64_t value) : value{ value } {}
+
+	constexpr verb_mask operator |(boost::beast::http::verb verb) const
+	{
+		return { value | (1 << static_cast<int>(verb))};
+	}
+
+	constexpr verb_mask operator |(const verb_mask &b) const
+	{
+		return { value | b.value };
+	}
+
+	constexpr bool operator &(boost::beast::http::verb verb) const
+	{
+		return { static_cast<bool>(value & (1 << static_cast<int>(verb))) };
+	}
+};
+
+struct verbs
+{
+	static constexpr verb_mask get{ verb_mask{} | boost::beast::http::verb::get };
+	static constexpr verb_mask post{ verb_mask{} | boost::beast::http::verb::post };
+	static constexpr verb_mask put{ verb_mask{} | boost::beast::http::verb::put };
+	static constexpr verb_mask delete_{ verb_mask{} | boost::beast::http::verb::delete_ };
+	static constexpr verb_mask any{ ~0ull };
+};
 
 template<std::size_t N>
 struct literal
@@ -216,64 +237,85 @@ struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
 	using arg = next_arg_finder::arg;
 };
 
-template<literal route_string, typename result_t>
+template<verb_mask verb_mask_, literal route_string, typename result_t>
 struct basic_endpoint
 {
 	using route = decltype(parse_route_string<route_string>());
 	using return_type_t = result_t;
+	static constexpr verb_mask mask{ verb_mask_ };
 
 	result_t value;
 	basic_endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
 };
 
+template<verb_mask verbs, literal route_string>
+using endpoint = boost::asio::awaitable<basic_endpoint<verbs, route_string, boost::beast::http::response<boost::beast::http::string_body>>>;
+
 template<literal route_string>
-using endpoint = boost::asio::awaitable<basic_endpoint<route_string, boost::beast::http::response<boost::beast::http::string_body>>>;
+using get_endpoint = endpoint<verbs::get, route_string>;
+
+template<literal route_string>
+using post_endpoint = endpoint<verbs::post, route_string>;
+
+template<literal route_string>
+using put_endpoint = endpoint<verbs::put, route_string>;
+
+template<literal route_string>
+using delete_endpoint = endpoint<verbs::delete_, route_string>;
+
+template<literal route_string>
+using any_endpoint = endpoint<verbs::any, route_string>;
 
 template<typename T>
 struct route_extractor {};
 
-/*
 template<typename endpoint, typename...args_>
 struct route_extractor<endpoint(*)(args_...)>
 {
+	static constexpr bool is_awaitable{ false };
+	static constexpr auto mask{ endpoint::mask };
 	using route = endpoint::route;
 	using args = std::tuple<args_...>;
 	using return_type = endpoint::return_type_t;
 };
-*/
 
 template<typename endpoint, typename...args_>
 struct route_extractor<boost::asio::awaitable<endpoint>(*)(args_...)>
 {
 	static constexpr bool is_awaitable{ true };
+	static constexpr auto mask{ endpoint::mask };
 	using route = endpoint::route;
 	using args = std::tuple<args_...>;
 	using return_type = boost::asio::awaitable<typename endpoint::return_type_t>;
 };
 
-/*
 template<typename klass, typename endpoint, typename...args_>
 struct route_extractor<endpoint(klass::*)(args_...)>
 {
 	static constexpr bool is_awaitable{ false };
+	static constexpr auto mask{ endpoint::mask };
 	using route = endpoint::route;
 	using args = std::tuple<klass *, args_...>;
 	using return_type = endpoint::return_type_t;
 };
-*/
 
 template<typename klass, typename endpoint, typename...args_>
 struct route_extractor<boost::asio::awaitable<endpoint>(klass::*)(args_...)>
 {
 	static constexpr bool is_awaitable{ true };
+	static constexpr auto mask{ endpoint::mask };
 	using route = endpoint::route;
 	using args = std::tuple<klass *, args_...>;
 	using return_type = boost::asio::awaitable<endpoint>;
 };	
 
+template<typename T>
+concept Router = T::is_router;
+
 template<auto...routes>
 struct router_t
 {
+	static constexpr bool is_router{ true };
 private:
 	template<typename argument_tuple, typename T, typename tuple>
 	struct single_pattern_matcher {};
@@ -296,7 +338,7 @@ private:
 	};
 
 	template<typename argument_tuple, typename tuple>
-	struct single_pattern_matcher<argument_tuple, argument_pattern<"*">, tuple>
+	struct single_pattern_matcher<argument_tuple, fixed_pattern<"*">, tuple>
 	{
 		bool operator()(tuple& values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
@@ -375,6 +417,7 @@ private:
 	struct route_context
 	{
 		boost::urls::url url;
+		request req;
 		boost::urls::params_ref params{ url.params() };
 	};
 
@@ -476,7 +519,7 @@ private:
 		tuple values{};
 		explicit_args_filler<tuple, explicit_args_tuple>::fill(values, expl_args);
 		ctx.url.path();
-		if (matches<re>(ctx.url.path(), values))
+		if (re::mask & ctx.req.method() && matches<re>(ctx.url.path(), values))
 		{
 			fill_non_path_args(values, ctx);
 			if constexpr (re::is_awaitable)
@@ -494,15 +537,15 @@ private:
 	}
 public:
 	template<typename...explicit_args>
-	return_type route(std::string url, explicit_args...expl_args)
+	return_type route(request req, explicit_args...expl_args)
 	{
-		auto parsed_url{ boost::urls::parse_origin_form(url) };
+		auto parsed_url{ boost::urls::parse_origin_form(req.target()) };
 		if (parsed_url.has_error())
 			throw std::runtime_error{ "url parse error" };
-		route_context ctx{ *parsed_url };
+		route_context ctx{ *parsed_url, std::move(req) };
 		if constexpr (is_async)
-			co_return co_await try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
+			co_return co_await try_route<std::tuple<request *, explicit_args...>, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
 		else
-			return try_route<std::tuple<explicit_args...>, routes...>(std::make_tuple(expl_args...), ctx);
+			return try_route<std::tuple<request *, explicit_args...>, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
 	}
 };

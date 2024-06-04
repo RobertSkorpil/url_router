@@ -1,51 +1,39 @@
-﻿#include <array>
-#include <cstddef>
-#include <algorithm>
-#include <vector>
-#include <print>
-#include <string_view>
-#include <tuple>
-#include <charconv>
-#include <functional>
-#include <boost/url.hpp>
-#include <ctre.hpp>
-#include <boost/asio.hpp>
-#include <boost/beast.hpp>
-#include <boost/asio/high_resolution_timer.hpp>
-#include <iostream>
+﻿#include "includes.h"
 #include "defs.h"
 #include "url_router.h"
+#include "server.h"
 
-boost::asio::io_context ctx;
-
-endpoint<"/product/<category>/<id>">
-product(path_arg<"id", uint32_t> id, path_arg<"category", uint32_t> cat)
-{
-	boost::asio::high_resolution_timer timer{ ctx, 2s };
-	co_await timer.async_wait(use_awaitable);
-	co_return response{ http::status::ok, 11, "xxxx" };
+get_endpoint<"/hello"> hello(asio::io_context *ctx, request *req) { 
+	boost::asio::system_timer wait{ *ctx, 500ms };
+	co_await wait.async_wait(use_awaitable);
+	auto agent{ (*req)[http::field::user_agent] };
+	co_return response{ http::status::ok, 11, std::format("ahoj, {}\n", std::string_view{ agent.begin(), agent.end() }) };
 }
 
-struct S
+get_endpoint<"/div/<a>/<b>"> divide(path_arg<"a", uint32_t> a, path_arg<"b", uint32_t> b)
 {
-    endpoint<"/category/<category>">
-    category(path_arg<"category", uint32_t> cat, query_arg<"count", uint32_t> count)
-    {
-        co_return response{ http::status::ok, 11, "xxxx" };
-    }
-};
+	if (!b)
+		co_return response{ http::status::bad_request, 11, "to nejde\n" };
 
-router_t<product, &S::category> router{};
+	auto d{ a / b };
+	auto r{ a - d * b };
+	co_return response{ http::status::ok, 11, std::format("{}, zbytek {}\n", d, r) };
+}
+
+any_endpoint<"*"> not_found() 
+{ 
+	co_return response{ http::status::not_found, 11, "nemame, nevedeme\n" }; 
+}
 
 int main()
 {
-	S s;
-	boost::asio::co_spawn(ctx, router.route("/product/1/23", &s), detached);
-	boost::asio::co_spawn(ctx, router.route("/category/1?count=312", &s), detached);
+	boost::asio::io_context ctx;
+	simple_http_server<&hello, &divide, &not_found> srvr{ ctx, 3454 };
+	boost::asio::co_spawn(ctx, srvr.run_server_async(), detached);
 
-	std::jthread thread([&] { 
-		ctx.run_for(10s); 
-		});
+	std::jthread t{ [&] {ctx.run(); } };
+	getchar();
+	ctx.stop();
 
 	return 0;
 }

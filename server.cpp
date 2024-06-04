@@ -77,17 +77,7 @@ namespace
 		asio::awaitable<response> process_request(const request& req)
 		{
 			auto tgt{ req.target() };
-			co_return router.route(req.target(), this);
-		/*
-			if(tgt.starts_with("/api/"))
-				return server_api(tgt);
-			else
-			{
-				if (ctre::match<R"(^()|(/[\d+]?)|(/product/.*)|(/order.*)$)">(tgt))
-					tgt = "/index.html";
-
-				return serve_file(tgt);
-			}	*/
+			co_return router.route(req.target(), this, &ctx);
 		}
 
 		void dump(const request& req, fmt::color color = fmt::color::cyan)

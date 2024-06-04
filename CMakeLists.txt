@@ -13,7 +13,7 @@ project ("url_router")
 find_package(ctre CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS url)
 
-add_executable (url_router url_router.cpp url_router.h)
+add_executable (url_router url_router.cpp url_router.h "server.h" "includes.h")
 
 target_link_libraries(url_router PRIVATE ctre::ctre Boost::headers Boost::url)
 
