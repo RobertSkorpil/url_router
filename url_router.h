@@ -68,6 +68,15 @@ struct literal
 	{
 		return { str.begin(), str.end() };
 	}
+
+	template<size_t N2>
+	consteval literal<N + N2 - 1> operator +(literal<N2> b) const
+	{
+		literal<N + N2 - 1> r;
+		auto out{ std::copy_n(std::begin(str), N - 1, std::begin(r.str)) };
+		std::copy_n(std::begin(b.str), N2 - 1, out);
+		return r;
+	}
 };
 
 template<bool val, typename T>
@@ -78,7 +87,7 @@ struct bool_const
 
 struct special
 {
-	enum class type_t { nothing, argument_pattern, asterisk };
+	enum class type_t { nothing, argument_pattern, asterisk, double_asterisk };
 	type_t type;
 	std::size_t position;
 	std::size_t length;
@@ -91,7 +100,10 @@ consteval special find_special(literal<N> l, size_t from)
 	std::size_t first{};
 	for (size_t i{ from }; i < l.size; ++i)
 		if (!bracket_found && l.str[i] == '*')
-			return { special::type_t::asterisk, i, 1 };
+			if(i + 1 == l.size || l.str[i + 1] != '*')
+				return { special::type_t::asterisk, i, 1 };
+			else 
+				return { special::type_t::double_asterisk, i, 2 };
 		else if (l.str[i] == '<')
 		{
 			bracket_found = true;
@@ -108,7 +120,10 @@ template<literal l, typename T = void>
 struct argument_pattern {};
 
 template<literal l>
-struct fixed_pattern {};
+struct fixed_pattern 
+{
+	static constexpr literal lit{ l };
+};
 
 template<typename pattern, typename next>
 struct pattern_chain {};
@@ -123,6 +138,12 @@ consteval auto find_patterns()
 			fixed_pattern<l.substr<from, b.position - from>()>,
 			pattern_chain<
 			fixed_pattern<"*">,
+			decltype(find_patterns<l, b.position + b.length>())>>{};
+		else if constexpr (b.type == special::type_t::double_asterisk)
+			return pattern_chain<
+			fixed_pattern<l.substr<from, b.position - from>()>,
+			pattern_chain<
+			fixed_pattern<"**">,
 			decltype(find_patterns<l, b.position + b.length>())>>{};
 		else if constexpr(b.type == special::type_t::argument_pattern)
 			return pattern_chain<
@@ -236,31 +257,31 @@ struct dechain<pattern_chain<pattern, next>>
 
 struct ignore_t {};
 
-template<typename pattern, typename argument_tuple>
+template<std::size_t index, typename pattern, typename argument_tuple>
 struct arg_finder 
 {
 	using type = ignore_t;
 	using arg = void;
 };
 
-template<literal L, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
+template<std::size_t index, literal L, typename T, typename...Args>
+struct arg_finder<index, argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
 {
 	using type = T;
 	using arg = path_arg<L, T>;
 };
 
-template<literal L>
-struct arg_finder<argument_pattern<L>, void>
+template<std::size_t index, literal L>
+struct arg_finder<index, argument_pattern<L>, void>
 {
 	using type = std::false_type;
 	using arg = void;
 };
 
-template<literal L, literal L2, typename T, typename...Args>
-struct arg_finder<argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
+template<std::size_t index, literal L, literal L2, typename T, typename...Args>
+struct arg_finder<index, argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
 {
-	using next_arg_finder = arg_finder<argument_pattern<L>, std::tuple<Args...>>;
+	using next_arg_finder = arg_finder<index + 1, argument_pattern<L>, std::tuple<Args...>>;
 	using type = next_arg_finder::type;
 	using arg = next_arg_finder::arg;
 };
@@ -269,6 +290,7 @@ template<verb_mask verb_mask_, literal route_string, typename result_t>
 struct basic_endpoint
 {
 	using route = decltype(parse_route_string<route_string>());
+
 	using return_type_t = result_t;
 	static constexpr verb_mask mask{ verb_mask_ };
 
@@ -380,7 +402,7 @@ private:
 	{
 		bool operator()(tuple& values, std::string_view::const_iterator& begin, std::string_view::const_iterator end) const
 		{
-			using argument_finder = arg_finder<argument_pattern<L>, argument_tuple>;
+			using argument_finder = arg_finder<0, argument_pattern<L>, argument_tuple>;
 			using type = argument_finder::type;
 			using arg = argument_finder::arg;
 
@@ -612,3 +634,163 @@ public:
 			return route_explicit<explicit_args...>(std::move(target), std::move(req), std::forward<explicit_args>(expl_args)...);
 	}
 };
+
+namespace v2
+{
+	namespace detail
+	{
+		template<typename T>
+		struct pattern_classifier;
+
+		template<>
+		struct pattern_classifier<fixed_pattern<"*">>
+		{
+			static constexpr bool is_fixed{ true };
+			static constexpr bool is_wildcard{ true };
+			static constexpr bool is_asterisk{ true };
+			static constexpr bool is_double_asterisk{ false };
+			static constexpr bool is_argument{ false };
+		};
+
+		template<>
+		struct pattern_classifier<fixed_pattern<"**">>
+		{
+			static constexpr bool is_fixed{ true };
+			static constexpr bool is_wildcard{ true };
+			static constexpr bool is_asterisk{ false };
+			static constexpr bool is_double_asterisk{ true };
+			static constexpr bool is_argument{ false };
+		};
+
+		template<literal L>
+		struct pattern_classifier<fixed_pattern<L>>
+		{
+			static constexpr bool is_fixed{ true };
+			static constexpr bool is_wildcard{ false };
+			static constexpr bool is_argument{ false };
+		};
+
+		template<literal L>
+		struct pattern_classifier<argument_pattern<L>>
+		{
+			static constexpr bool is_fixed{ false };
+			static constexpr bool is_argument{ true };
+		};
+
+		template<typename tuple>
+		struct tuple_decapitator;
+
+		template<typename first, typename...rest>
+		struct tuple_decapitator<std::tuple<first, rest...>>
+		{
+			using type = std::tuple<rest...>;
+		};
+
+		template<typename pattern_tuple, typename function_argument_tuple>
+		consteval auto compose_regex()
+		{
+			if constexpr (std::is_same_v<pattern_tuple, std::tuple<>>)
+				return literal{ "" };
+			else
+			{
+				using first_pattern = typename std::decay_t<decltype(std::get<0>(std::declval<pattern_tuple>()))>;
+				using classifier = pattern_classifier<first_pattern>;
+
+				auto first_regex{ []() constexpr {
+					if constexpr (classifier::is_fixed)
+					{
+						if constexpr (classifier::is_wildcard)
+						{
+							if constexpr (classifier::is_asterisk)
+								return literal{ R"([^/]*)" };
+							else if constexpr (classifier::is_double_asterisk)
+								return literal{ R"(.*)" };
+						}
+						else
+							return first_pattern::lit;
+					}
+					else if constexpr (classifier::is_argument)
+					{
+						using arg_type = typename arg_finder<0, first_pattern, function_argument_tuple>::type;
+						if constexpr (std::is_same_v<arg_type, std::string> || std::is_same_v<arg_type, std::string_view>)
+							return literal{ R"(([^/]*))" };
+						else if constexpr (std::is_integral_v<arg_type>)
+							return literal{ R"((\d+))" };
+					}
+				}() };
+
+				using other_patterns = tuple_decapitator<pattern_tuple>::type;
+				return first_regex + compose_regex<other_patterns, function_argument_tuple>();
+			}
+		}
+
+		template<typename T>
+		struct endpoint_extractor;
+
+		template<typename endpoint, typename...args_>
+		struct endpoint_extractor<boost::asio::awaitable<endpoint>(*)(args_...)>
+		{
+			using type = endpoint;
+			using args = std::tuple<args_...>;
+		};
+
+		template<typename klass, typename endpoint, typename...args_>
+		struct endpoint_extractor<boost::asio::awaitable<endpoint>(klass::*)(args_...)>
+		{
+			using type = endpoint;
+			using args = std::tuple<klass*, args_...>;
+		};
+
+		template<size_t N>
+		consteval auto literal_to_ctre(literal<N> l)
+		{
+			return ctll::fixed_string<N - 1>{ ctll::construct_from_pointer, std::data(l.str) };
+		}
+
+		template<typename pattern_tuple, typename function_argument_tuple>
+		struct function_argument_sorter;
+
+		template<typename first_pattern, typename...other_patterns, typename function_argument_tuple>
+		struct function_argument_sorter<std::tuple<first_pattern, other_patterns...>, function_argument_tuple>
+		{
+			using type = typename function_argument_sorter<std::tuple<other_patterns...>, function_argument_tuple>::type;
+		};
+
+		//blbe, protoze mezi path_argama muzou bejt jiny. musi to nejak oindexovat nebo nevim
+		template<typename first_pattern, typename...other_patterns, typename function_argument_tuple>
+		struct function_argument_sorter<std::tuple<first_pattern, other_patterns...>, function_argument_tuple>
+		{
+			using type = typename function_argument_sorter<std::tuple<other_patterns...>, function_argument_tuple>::type;
+		};
+	}
+
+	template<verb_mask verb_mask_, literal route_string, typename result_t>
+	struct basic_endpoint
+	{
+		static constexpr verb_mask mask{ verb_mask_ };
+		using pattern_chain = decltype(parse_route_string<route_string>());
+		using pattern_tuple = typename dechain<pattern_chain>::tuple;
+
+		using return_type_t = result_t;
+
+		result_t value;
+		basic_endpoint(return_type_t&& value) : value{ std::forward<return_type_t>(value) } {};
+	};
+
+	template<verb_mask verb_mask_, literal route_string, typename result_t>
+	using async_endpoint = boost::asio::awaitable<basic_endpoint<verb_mask_, route_string, result_t>>;
+
+	template<auto endpoint>
+	struct route
+	{
+		using endpoint_extractor = typename detail::endpoint_extractor<std::decay_t<decltype(endpoint)>>;
+		using endpoint_type = endpoint_extractor::type;
+		using function_argument_tuple = endpoint_extractor::args;
+		static constexpr literal path_regex{ detail::compose_regex<endpoint_type::pattern_tuple, function_argument_tuple>() };
+		static constexpr auto ctre_string{ detail::literal_to_ctre(path_regex) };
+
+		using regex_match_result_type = decltype(ctre::match<ctre_string>(""));
+
+		using function_argument_tuple_sorted_by_path_occurrence = typename detail::function_argument_sorter<endpoint::pattern_tuple, function_argument_tuple>::type;
+	};
+}

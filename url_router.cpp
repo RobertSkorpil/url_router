@@ -45,8 +45,19 @@ api(asio::io_context *ctx, request *req, reroute_t reroute) {
 	co_return co_await subrouter.route(*req, ctx, reroute);
 }
 
+v2::async_endpoint<verbs::get, "/api/*/x/**/div/<a>/<b>", response>
+test_v2(path_arg<"a", uint32_t> a, path_arg<"b", std::string_view> b)
+{
+	co_return response{ http::status::not_found, 11, "nemame, nevedeme\n" }; 
+}
+
 int main()
 {
+	using test_route = v2::route<&test_v2>;
+	std::string_view path_regex{ test_route::path_regex.str.begin(), test_route::path_regex.str.end() };
+	std::println("{}", path_regex);
+	std::println("{}", typeid(test_route::regex_match_result_type).name());
+
 	boost::asio::io_context ctx;
 	simple_http_server<&hello, &divide, &api, &not_found> srvr{ ctx, 3454 };
 

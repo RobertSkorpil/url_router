@@ -8,6 +8,7 @@
 #include <tuple>
 #include <charconv>
 #include <functional>
+#include <print>
 #include <boost/url.hpp>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
