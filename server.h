@@ -3,6 +3,7 @@
 #include "defs.h"
 #include "url_router.h"
 
+using reroute_t = basic_reroute_t<boost::asio::awaitable<boost::beast::http::response<boost::beast::http::string_body>>>;
 template<Router router>
 struct http_server
 {

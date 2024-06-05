@@ -33,6 +33,12 @@ struct verbs
 	static constexpr verb_mask any{ ~0ull };
 };
 
+template<typename return_type>
+struct basic_reroute_t : std::function<return_type(std::string)>
+{
+	using std::function<return_type(std::string)>::function;
+};
+
 template<std::size_t N>
 struct literal
 {
@@ -70,16 +76,30 @@ struct bool_const
 	static constexpr bool value{ val };
 };
 
-template<size_t N>
-consteval std::tuple<size_t, ptrdiff_t> find_brackets(literal<N> l, size_t from)
+struct special
 {
-	ptrdiff_t first{ -1 };
+	enum class type_t { nothing, argument_pattern, asterisk };
+	type_t type;
+	std::size_t position;
+	std::size_t length;
+};
+
+template<size_t N>
+consteval special find_special(literal<N> l, size_t from)
+{
+	bool bracket_found{};
+	std::size_t first{};
 	for (size_t i{ from }; i < l.size; ++i)
-		if (l.str[i] == '<')
+		if (!bracket_found && l.str[i] == '*')
+			return { special::type_t::asterisk, i, 1 };
+		else if (l.str[i] == '<')
+		{
+			bracket_found = true;
 			first = i;
-		else if (l.str[i] == '>' && first >= 0)
-			return { first, i - first };
-	return { 0, 0 };
+		}
+		else if (l.str[i] == '>' && bracket_found)
+			return { special::type_t::argument_pattern, first, i - first };
+	return { special::type_t::nothing };
 }
 
 struct last {};
@@ -96,13 +116,21 @@ struct pattern_chain {};
 template<literal l, size_t from>
 consteval auto find_patterns()
 {
-	if constexpr (constexpr auto b{ find_brackets(l, from) }; std::get<1>(b))
-		return
-		pattern_chain<
-		fixed_pattern<l.substr<from, std::get<0>(b) - from>()>,
-		pattern_chain<
-		argument_pattern<l.substr<std::get<0>(b) + 1, std::get<1>(b) - 1>()>,
-		decltype(find_patterns<l, std::get<0>(b) + std::get<1>(b) + 1>())>>{};
+	if constexpr (constexpr auto b{ find_special(l, from) }; b.type != special::type_t::nothing)
+	{
+		if constexpr (b.type == special::type_t::asterisk)
+			return pattern_chain<
+			fixed_pattern<l.substr<from, b.position - from>()>,
+			pattern_chain<
+			fixed_pattern<"*">,
+			decltype(find_patterns<l, b.position + b.length>())>>{};
+		else if constexpr(b.type == special::type_t::argument_pattern)
+			return pattern_chain<
+			fixed_pattern<l.substr<from, b.position - from>()>,
+			pattern_chain<
+			argument_pattern<l.substr<b.position + 1, b.length - 1>()>,
+			decltype(find_patterns<l, b.position + b.length + 1>())>>{};
+	}
 	else if constexpr (from == l.str.size())
 		return last{};
 	else
@@ -518,34 +546,69 @@ private:
 		using tuple = re::args;
 		tuple values{};
 		explicit_args_filler<tuple, explicit_args_tuple>::fill(values, expl_args);
-		ctx.url.path();
 		if (re::mask & ctx.req.method() && matches<re>(ctx.url.path(), values))
 		{
 			fill_non_path_args(values, ctx);
 			if constexpr (re::is_awaitable)
-				co_return (co_await std::apply(route, values)).value;
+				co_return (co_await std::apply(route, std::move(values))).value;
 			else
-				return std::apply(route, values).value;
+				return std::apply(route, std::move(values)).value;
 		}
 		else
 		{
 			if constexpr (re::is_awaitable)
-				co_return co_await try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
+				co_return co_await try_route<explicit_args_tuple, other_routes...>(std::move(expl_args), ctx);
 			else
-				return try_route<explicit_args_tuple, other_routes...>(expl_args, ctx);
+				return try_route<explicit_args_tuple, other_routes...>(std::move(expl_args), ctx);
+		}
+	}
+
+	template<typename...explicit_args>
+	return_type route_explicit(std::string url, request req, explicit_args...expl_args)
+	{
+		auto parsed_url{ boost::urls::parse_origin_form(url) };
+		if (parsed_url.has_error())
+			throw std::runtime_error{ "url parse error" };
+		route_context ctx{ *parsed_url, std::move(req) };
+
+		using specific_reroute_t = basic_reroute_t<return_type>;
+		if constexpr ((std::is_same_v<specific_reroute_t, explicit_args> || ...))
+		{
+			using explicit_arg_tuple = std::tuple<request*, explicit_args...>;
+
+			if constexpr (is_async)
+				co_return co_await try_route<explicit_arg_tuple, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
+			else
+				return try_route<explicit_arg_tuple, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
+		}
+		else
+		{
+			specific_reroute_t reroute{
+				[&](std::string reroute_url) mutable -> return_type
+				{
+					if constexpr (is_async)
+						co_return co_await route_explicit(std::move(reroute_url), std::move(ctx.req), std::forward<explicit_args>(expl_args)...);
+					else
+						return route_explicit(std::move(reroute_url), std::move(ctx.req), std::forward<explicit_args>(expl_args)...);
+				}
+			};
+
+			using explicit_arg_tuple = std::tuple<request*, specific_reroute_t, explicit_args...>;
+
+			if constexpr (is_async)
+				co_return co_await try_route<explicit_arg_tuple, routes...>(std::make_tuple(&ctx.req, std::move(reroute), std::forward<explicit_args>(expl_args)...), ctx);
+			else
+				return try_route<explicit_arg_tuple, routes...>(std::make_tuple(&ctx.req, std::move(reroute), std::forward<explicit_args>(expl_args)...), ctx);
 		}
 	}
 public:
 	template<typename...explicit_args>
 	return_type route(request req, explicit_args...expl_args)
 	{
-		auto parsed_url{ boost::urls::parse_origin_form(req.target()) };
-		if (parsed_url.has_error())
-			throw std::runtime_error{ "url parse error" };
-		route_context ctx{ *parsed_url, std::move(req) };
+		std::string target{ req.target() };
 		if constexpr (is_async)
-			co_return co_await try_route<std::tuple<request *, explicit_args...>, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
+			co_return co_await route_explicit<explicit_args...>(std::move(target), std::move(req), std::forward<explicit_args>(expl_args)...);
 		else
-			return try_route<std::tuple<request *, explicit_args...>, routes...>(std::make_tuple(&ctx.req, expl_args...), ctx);
+			return route_explicit<explicit_args...>(std::move(target), std::move(req), std::forward<explicit_args>(expl_args)...);
 	}
 };
