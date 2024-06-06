@@ -841,6 +841,7 @@ namespace v2
 				store_capture_into_argument_impl(std::make_index_sequence<capture_group_count>(), match, args);
 			}
 
+			/*
 			static bool match_and_call(const route_context& ctx)
 			{
 				if (auto match{ ctre::match<ctre_string>(ctx.url.path()) })
@@ -850,9 +851,30 @@ namespace v2
 
 					return true;
 				}
-				return
-					false;
-			}
+				else
+                    return false;
+			}	*/
 		};
 	}
+
+    template<typename ... endpoints>
+	struct router
+	{
+		boost::asio::awaitable<response> route(request req)
+		{
+			[] <typename endpoint>(const request & req)
+			{
+				using descriptor = detail::route_descriptor<endpoint>;
+				if (auto match{ ctre::match<descriptor::ctre_string>(ctx.url.path()) })
+				{
+					descriptor::function_argument_tuple args{};
+					descriptor::store_capture_into_argument_tuple(match, args);
+
+					return true;
+				}
+				else
+                    return false;
+			}
+		}
+	};
 }
