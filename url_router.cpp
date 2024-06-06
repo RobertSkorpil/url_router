@@ -53,11 +53,11 @@ test_v2(path_arg<"a", uint32_t> a, path_arg<"b", std::string_view> b)
 
 int main()
 {
-	using test_route = v2::route<&test_v2>;
+	using test_route = v2::detail::route_descriptor<&test_v2>;
 	std::string_view path_regex{ test_route::path_regex.str.begin(), test_route::path_regex.str.end() };
 	std::println("{}", path_regex);
-	std::println("{}", typeid(test_route::regex_match_result_type).name());
-	std::println("{}", test_route::capture_group_count);
+	std::println("{}", typeid(test_route::endpoint_type::argument_pattern_tuple).name());
+//	std::println("{}", test_route::capture_group_count);
 
 	boost::asio::io_context ctx;
 	simple_http_server<&hello, &divide, &api, &not_found> srvr{ ctx, 3454 };

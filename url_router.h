@@ -257,30 +257,34 @@ struct dechain<pattern_chain<pattern, next>>
 
 struct ignore_t {};
 
-template<std::size_t index, typename pattern, typename argument_tuple>
+template<std::size_t index_, typename pattern, typename argument_tuple>
 struct arg_finder 
 {
+	static constexpr auto index{ index_ };
 	using type = ignore_t;
 	using arg = void;
 };
 
-template<std::size_t index, literal L, typename T, typename...Args>
-struct arg_finder<index, argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
+template<std::size_t index_, literal L, typename T, typename...Args>
+struct arg_finder<index_, argument_pattern<L>, std::tuple<path_arg<L, T>, Args...>>
 {
+	static constexpr auto index{ index_ };
 	using type = T;
 	using arg = path_arg<L, T>;
 };
 
-template<std::size_t index, literal L>
-struct arg_finder<index, argument_pattern<L>, void>
+template<std::size_t index_, literal L>
+struct arg_finder<index_, argument_pattern<L>, void>
 {
+	static constexpr auto index{ index_ };
 	using type = std::false_type;
 	using arg = void;
 };
 
-template<std::size_t index, literal L, literal L2, typename T, typename...Args>
-struct arg_finder<index, argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
+template<std::size_t index_, literal L, literal L2, typename T, typename...Args>
+struct arg_finder<index_, argument_pattern<L>, std::tuple<path_arg<L2, T>, Args...>>
 {
+	static constexpr auto index{ index_ };
 	using next_arg_finder = arg_finder<index + 1, argument_pattern<L>, std::tuple<Args...>>;
 	using type = next_arg_finder::type;
 	using arg = next_arg_finder::arg;
@@ -640,6 +644,27 @@ namespace v2
 	namespace detail
 	{
 		template<typename T>
+		struct filter_out_argument_patterns;
+
+		template<>
+		struct filter_out_argument_patterns<std::tuple<>>
+		{
+			using type = std::tuple<>;
+		};
+
+		template<typename first_pattern, typename...other_patterns>
+		struct filter_out_argument_patterns<std::tuple<first_pattern, other_patterns...>>
+		{
+			using type = typename filter_out_argument_patterns<std::tuple<other_patterns...>>::type;
+		};
+
+		template<literal L, typename...other_patterns>
+		struct filter_out_argument_patterns<std::tuple<argument_pattern<L>, other_patterns...>>
+		{
+			using type = decltype(std::tuple_cat(std::declval<std::tuple<argument_pattern<L>>>(), std::declval<typename filter_out_argument_patterns<std::tuple<other_patterns...>>::type>()));
+		};
+
+		template<typename T>
 		struct pattern_classifier;
 
 		template<>
@@ -747,13 +772,22 @@ namespace v2
 			return ctll::fixed_string<N - 1>{ ctll::construct_from_pointer, std::data(l.str) };
 		}
 
-		template<typename pattern_tuple, typename function_argument_tuple, auto ctre_string>
+		template<typename function_argument_tuple, typename...argument_patterns>
+		consteval auto create_capture_group_map_impl(std::tuple<argument_patterns...>)
+		{
+            std::array<size_t, sizeof...(argument_patterns)> result;
+
+            size_t i{};
+            ((result[i++] = arg_finder<0, argument_patterns, function_argument_tuple>::index), ...);
+
+            return result;
+
+		}
+
+		template<typename argument_pattern_tuple, typename function_argument_tuple>
 		consteval auto create_capture_group_map()
 		{
-			constexpr auto capture_group_count{ ctre::match<ctre_string>("").count() };
-			std::array<size_t, capture_group_count> result;
-
-			return result;
+			return create_capture_group_map_impl<function_argument_tuple>(argument_pattern_tuple{});
 		}
 	}
 
@@ -763,6 +797,7 @@ namespace v2
 		static constexpr verb_mask mask{ verb_mask_ };
 		using pattern_chain = decltype(parse_route_string<route_string>());
 		using pattern_tuple = typename dechain<pattern_chain>::tuple;
+		using argument_pattern_tuple = typename detail::filter_out_argument_patterns<pattern_tuple>::type;
 
 		using return_type_t = result_t;
 
@@ -773,17 +808,51 @@ namespace v2
 	template<verb_mask verb_mask_, literal route_string, typename result_t>
 	using async_endpoint = boost::asio::awaitable<basic_endpoint<verb_mask_, route_string, result_t>>;
 
-	template<auto endpoint>
-	struct route
+	namespace detail
 	{
-		using endpoint_extractor = typename detail::endpoint_extractor<std::decay_t<decltype(endpoint)>>;
-		using endpoint_type = endpoint_extractor::type;
-		using function_argument_tuple = endpoint_extractor::args;
-		static constexpr literal path_regex{ detail::compose_regex<endpoint_type::pattern_tuple, function_argument_tuple>() };
-		static constexpr auto ctre_string{ detail::literal_to_ctre(path_regex) };
+        struct route_context
+        {
+            boost::urls::url url;
+            request req;
+            boost::urls::params_ref params{ url.params() };
+        };
 
-		using regex_match_result_type = decltype(ctre::match<ctre_string>(""));
+		template<auto endpoint>
+		struct route_descriptor
+		{
+			using endpoint_extractor = typename endpoint_extractor<std::decay_t<decltype(endpoint)>>;
+			using endpoint_type = endpoint_extractor::type;
+			using function_argument_tuple = endpoint_extractor::args;
+			static constexpr literal path_regex{ compose_regex<endpoint_type::pattern_tuple, function_argument_tuple>() };
+			static constexpr auto ctre_string{ literal_to_ctre(path_regex) };
+			using regex_match_result_type = decltype(ctre::match<ctre_string>(""));
+			static constexpr auto capture_group_count{ regex_match_result_type::count() - 1 };
+			static constexpr auto capture_group_map{ create_capture_group_map<endpoint_type::argument_pattern_tuple, function_argument_tuple>() };
 
-		static constexpr auto capture_group_map{ detail::create_capture_group_map<endpoint_type::pattern_tuple, function_argument_tuple, ctre_string>() };
-	};
+			template<size_t...i>
+			static void store_capture_into_argument_tuple_impl(std::index_sequence<i...>, const regex_match_result_type& match, function_argument_tuple& args) 
+			{
+				size_t j{ 1 };
+				((std::get<i>(args) = std::get<j++>(match)), ...);
+			}
+
+			static void store_capture_into_argument_tuple(const regex_match_result_type& match, function_argument_tuple& args)
+			{
+				store_capture_into_argument_impl(std::make_index_sequence<capture_group_count>(), match, args);
+			}
+
+			static bool match_and_call(const route_context& ctx)
+			{
+				if (auto match{ ctre::match<ctre_string>(ctx.url.path()) })
+				{
+					function_argument_tuple args{};
+					store_capture_into_argument_tuple(match, args);
+
+					return true;
+				}
+				return
+					false;
+			}
+		};
+	}
 }
