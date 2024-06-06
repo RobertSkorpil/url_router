@@ -747,21 +747,14 @@ namespace v2
 			return ctll::fixed_string<N - 1>{ ctll::construct_from_pointer, std::data(l.str) };
 		}
 
-		template<typename pattern_tuple, typename function_argument_tuple>
-		struct function_argument_sorter;
-
-		template<typename first_pattern, typename...other_patterns, typename function_argument_tuple>
-		struct function_argument_sorter<std::tuple<first_pattern, other_patterns...>, function_argument_tuple>
+		template<typename pattern_tuple, typename function_argument_tuple, auto ctre_string>
+		consteval auto create_capture_group_map()
 		{
-			using type = typename function_argument_sorter<std::tuple<other_patterns...>, function_argument_tuple>::type;
-		};
+			constexpr auto capture_group_count{ ctre::match<ctre_string>("").count() };
+			std::array<size_t, capture_group_count> result;
 
-		//blbe, protoze mezi path_argama muzou bejt jiny. musi to nejak oindexovat nebo nevim
-		template<typename first_pattern, typename...other_patterns, typename function_argument_tuple>
-		struct function_argument_sorter<std::tuple<first_pattern, other_patterns...>, function_argument_tuple>
-		{
-			using type = typename function_argument_sorter<std::tuple<other_patterns...>, function_argument_tuple>::type;
-		};
+			return result;
+		}
 	}
 
 	template<verb_mask verb_mask_, literal route_string, typename result_t>
@@ -791,6 +784,6 @@ namespace v2
 
 		using regex_match_result_type = decltype(ctre::match<ctre_string>(""));
 
-		using function_argument_tuple_sorted_by_path_occurrence = typename detail::function_argument_sorter<endpoint::pattern_tuple, function_argument_tuple>::type;
+		static constexpr auto capture_group_map{ detail::create_capture_group_map<endpoint_type::pattern_tuple, function_argument_tuple, ctre_string>() };
 	};
 }

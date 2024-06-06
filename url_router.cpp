@@ -57,6 +57,7 @@ int main()
 	std::string_view path_regex{ test_route::path_regex.str.begin(), test_route::path_regex.str.end() };
 	std::println("{}", path_regex);
 	std::println("{}", typeid(test_route::regex_match_result_type).name());
+	std::println("{}", test_route::capture_group_count);
 
 	boost::asio::io_context ctx;
 	simple_http_server<&hello, &divide, &api, &not_found> srvr{ ctx, 3454 };
